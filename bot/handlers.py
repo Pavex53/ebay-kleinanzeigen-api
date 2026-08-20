@@ -18,7 +18,8 @@ from telegram.ext import (
 )
 
 from backend.models import Search, TelegramAccount, User
-from backend.utils.auth import check_subscription_access
+from backend.utils.auth import check_subscription_access, get_active_subscription
+from backend.utils.plan_limits import get_search_limit
 from bot.config import Settings
 from bot.keyboards import back_to_menu, cancel_search, main_menu, subscription_menu
 
@@ -67,6 +68,25 @@ def get_current_user(db: Session, update: Update) -> User:
     return get_or_create_user(db, telegram_user.id, telegram_user.username)
 
 
+def get_search_capacity(db: Session, user_id: int) -> tuple[bool, str, int, int]:
+    subscription = get_active_subscription(db, user_id)
+    if subscription is None:
+        return False, "Für Suchen brauchst du ein aktives Abo.", 0, 0
+
+    limit = get_search_limit(subscription.plan_tier)
+    used = db.query(Search).filter(Search.user_id == user_id).count()
+    if used >= limit:
+        plan = subscription.plan_tier.value.capitalize()
+        return (
+            False,
+            f"Du nutzt bereits alle {limit} Suchplätze deines {plan}-Plans. "
+            "Lösche eine Suche oder upgrade dein Abo.",
+            used,
+            limit,
+        )
+    return True, "", used, limit
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     db = app_context(context.application).db_factory()
     try:
@@ -98,23 +118,20 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         await show_subscription(update, context)
     elif action.startswith("subscription:buy:"):
         await buy_subscription(update, context)
-    elif action == "search:new":
-        await query.edit_message_text("Starte eine neue Suche mit /neue_suche.", reply_markup=back_to_menu())
     elif action == "search:list":
         await list_searches(update, context)
     elif action == "settings:show":
         await query.edit_message_text(
-            "⚙️ Einstellungen\n\nSuchfilter werden beim Erstellen einer Suche gesetzt. Erweiterte Einstellungen folgen nach dem MVP.",
+            "⚙️ Einstellungen\n\nSuchfilter werden beim Erstellen einer Suche gesetzt. "
+            "Erweiterte Einstellungen folgen nach dem MVP.",
             reply_markup=back_to_menu(),
         )
     elif action == "help:show":
         await query.edit_message_text(
-            "ℹ️ Hilfe\n\nMit 'Suche erstellen' legst du Suchbegriff, Ort, Radius und Preisbereich fest. Bei neuen Treffern erhältst du eine Telegram-Nachricht.",
+            "ℹ️ Hilfe\n\nMit 'Suche erstellen' legst du Suchbegriff, Ort, Radius und "
+            "Preisbereich fest. Bei neuen Treffern erhältst du eine Telegram-Nachricht.",
             reply_markup=back_to_menu(),
         )
-    elif action == "search:cancel":
-        context.user_data.clear()
-        await query.edit_message_text("Suche abgebrochen.", reply_markup=main_menu())
 
 
 async def show_subscription(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -126,9 +143,15 @@ async def show_subscription(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         user = get_current_user(db, update)
         access = check_subscription_access(db, user.id)
         if access["has_access"]:
+            subscription = get_active_subscription(db, user.id)
+            assert subscription is not None
+            limit = get_search_limit(subscription.plan_tier)
+            used = db.query(Search).filter(Search.user_id == user.id).count()
             text = (
-                f"💳 Dein Abo\n\nPlan: {access['plan_tier'].capitalize()}\n"
+                "💳 Dein Abo\n\n"
+                f"Plan: {access['plan_tier'].capitalize()}\n"
                 f"Suchintervall: alle {access['interval_minutes']} Minuten\n"
+                f"Suchen: {used}/{limit}\n"
                 f"Gültig bis: {access['current_period_end']}"
             )
         else:
@@ -147,8 +170,7 @@ async def buy_subscription(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     db = bot_context.db_factory()
     try:
         user = get_current_user(db, update)
-        configured_price_id = getattr(bot_context.settings, f"stripe_price_{plan}")
-        if not configured_price_id:
+        if not getattr(bot_context.settings, f"stripe_price_{plan}"):
             await query.edit_message_text("Dieser Plan ist noch nicht konfiguriert.", reply_markup=back_to_menu())
             return
 
@@ -162,10 +184,12 @@ async def buy_subscription(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
         await query.edit_message_text(
             f"💳 {plan.capitalize()} auswählen\n\nDie Zahlung erfolgt sicher über Stripe.",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("Jetzt abonnieren", url=checkout_url)],
-                [InlineKeyboardButton("⬅️ Zurück", callback_data="subscription:status")],
-            ]),
+            reply_markup=InlineKeyboardMarkup(
+                [
+                    [InlineKeyboardButton("Jetzt abonnieren", url=checkout_url)],
+                    [InlineKeyboardButton("⬅️ Zurück", callback_data="subscription:status")],
+                ]
+            ),
         )
     except httpx.HTTPError:
         logger.exception("Could not create checkout session")
@@ -194,7 +218,8 @@ async def list_searches(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             text = "📋 Meine Suchen\n\nDu hast noch keine Suchen gespeichert."
         else:
             entries = [
-                f"{'✅' if item.is_enabled else '⏸️'} {item.name}\n{item.query} · {item.location or 'bundesweit'} · {item.radius or 0} km"
+                f"{'✅' if item.is_enabled else '⏸️'} {item.name}\n"
+                f"{item.query} · {item.location or 'bundesweit'} · {item.radius or 0} km"
                 for item in searches
             ]
             text = "📋 Meine Suchen\n\n" + "\n\n".join(entries)
@@ -203,15 +228,32 @@ async def list_searches(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         db.close()
 
 
+async def start_search_from_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    if query is None:
+        return ConversationHandler.END
+
+    db = app_context(context.application).db_factory()
+    try:
+        user = get_current_user(db, update)
+        allowed, reason, _, _ = get_search_capacity(db, user.id)
+        if not allowed:
+            await query.edit_message_text(reason, reply_markup=subscription_menu())
+            return ConversationHandler.END
+    finally:
+        db.close()
+
+    await query.edit_message_text("🔎 Was möchtest du suchen?", reply_markup=cancel_search())
+    return QUERY
+
+
 async def search_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     db = app_context(context.application).db_factory()
     try:
         user = get_current_user(db, update)
-        if not check_subscription_access(db, user.id)["has_access"]:
-            await update.message.reply_text(
-                "Für Suchen brauchst du ein aktives Abo.",
-                reply_markup=subscription_menu(),
-            )
+        allowed, reason, _, _ = get_search_capacity(db, user.id)
+        if not allowed:
+            await update.message.reply_text(reason, reply_markup=subscription_menu())
             return ConversationHandler.END
     finally:
         db.close()
@@ -260,8 +302,8 @@ async def search_price_from(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
 async def search_price_to(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     try:
-        value = float(update.message.text.replace(",", "."))
-        if value < 0:
+        price_to = float(update.message.text.replace(",", "."))
+        if price_to < 0:
             raise ValueError
     except ValueError:
         await update.message.reply_text("Bitte eine gültige Zahl eingeben.")
@@ -270,16 +312,21 @@ async def search_price_to(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     db = app_context(context.application).db_factory()
     try:
         user = get_current_user(db, update)
+        allowed, reason, _, _ = get_search_capacity(db, user.id)
+        if not allowed:
+            context.user_data.clear()
+            await update.message.reply_text(reason, reply_markup=subscription_menu())
+            return ConversationHandler.END
+
         data = context.user_data
-        name = f"{data['search_query']} · {data['search_location']}"
         search = Search(
             user_id=user.id,
-            name=name[:255],
+            name=f"{data['search_query']} · {data['search_location']}"[:255],
             query=data["search_query"],
             location=data["search_location"],
             radius=data["search_radius"],
             price_from=data["price_from"] or None,
-            price_to=value or None,
+            price_to=price_to or None,
         )
         db.add(search)
         db.commit()
@@ -301,19 +348,24 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 
 
 def register_handlers(application: Application) -> None:
+    conversation = ConversationHandler(
+        entry_points=[
+            CommandHandler("neue_suche", search_start),
+            CallbackQueryHandler(start_search_from_button, pattern="^search:new$"),
+        ],
+        states={
+            QUERY: [MessageHandler(filters.TEXT & ~filters.COMMAND, search_query)],
+            LOCATION: [MessageHandler(filters.TEXT & ~filters.COMMAND, search_location)],
+            RADIUS: [MessageHandler(filters.TEXT & ~filters.COMMAND, search_radius)],
+            PRICE_FROM: [MessageHandler(filters.TEXT & ~filters.COMMAND, search_price_from)],
+            PRICE_TO: [MessageHandler(filters.TEXT & ~filters.COMMAND, search_price_to)],
+        },
+        fallbacks=[
+            CommandHandler("abbrechen", cancel),
+            CallbackQueryHandler(cancel, pattern="^search:cancel$"),
+        ],
+    )
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("menu", menu_command))
+    application.add_handler(conversation)
     application.add_handler(CallbackQueryHandler(menu_callback))
-    application.add_handler(
-        ConversationHandler(
-            entry_points=[CommandHandler("neue_suche", search_start)],
-            states={
-                QUERY: [MessageHandler(filters.TEXT & ~filters.COMMAND, search_query)],
-                LOCATION: [MessageHandler(filters.TEXT & ~filters.COMMAND, search_location)],
-                RADIUS: [MessageHandler(filters.TEXT & ~filters.COMMAND, search_radius)],
-                PRICE_FROM: [MessageHandler(filters.TEXT & ~filters.COMMAND, search_price_from)],
-                PRICE_TO: [MessageHandler(filters.TEXT & ~filters.COMMAND, search_price_to)],
-            },
-            fallbacks=[CommandHandler("abbrechen", cancel)],
-        )
-    )
