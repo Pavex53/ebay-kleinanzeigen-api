@@ -28,6 +28,7 @@ services:
     networks:
       - internal
 
+
   backend:
     build:
       context: .
@@ -54,6 +55,9 @@ services:
       - edge
 
   bot:
+    dns:
+      - 1.1.1.1
+      - 8.8.8.8	
     build:
       context: .
       dockerfile: Dockerfile.bot
