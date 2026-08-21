@@ -8,6 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
 
+from backend import database
 from backend.database import Database, get_db
 from backend.models import User
 from backend.services import stripe_service
@@ -15,10 +16,20 @@ from backend.utils.auth import is_subscriber_active, check_subscription_access
 
 
 # Environment variables
-DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://user:pass@localhost:5432/kleinanzeigen_saas")
+DATABASE_URL = os.getenv(
+    "DATABASE_URL",
+    "postgresql://user:pass@localhost:5432/kleinanzeigen_saas",
+)
 STRIPE_SECRET_KEY = os.getenv("STRIPE_SECRET_KEY")
 STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET")
 BASE_URL = os.getenv("BASE_URL", "http://localhost:8000")
+
+
+if not DATABASE_URL:
+    raise RuntimeError("DATABASE_URL is not configured")
+
+database.db = Database(DATABASE_URL)
+database.db.create_tables()
 
 # Price IDs (replace with your actual Stripe price IDs)
 PRICE_BASIC = os.getenv("STRIPE_PRICE_BASIC", "price_basic_id")
@@ -119,38 +130,55 @@ def create_checkout_session(
     return {"checkout_url": checkout_url}
 
 
-@app.post("/webhooks/stripe", response_model=WebhookResponse)
-def stripe_webhook(request: Request, db: Session = Depends(get_database)):
-    """
-    Handle Stripe webhook events.
-    
-    Stripe sends events here when payments/subscriptions change.
-    """
-    payload = request.body()
-    sig_header = request.headers.get("stripe-signature")
-    
-    if not sig_header:
-        raise HTTPException(status_code=400, detail="Missing stripe-signature header")
-    
-    try:
-        # Verify webhook signature
-        event = stripe.Webhook.construct_event(
-            payload, sig_header, STRIPE_WEBHOOK_SECRET
+@app.post("/webhooks/stripe")
+async def stripe_webhook(
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    payload = await request.body()
+    signature = request.headers.get("stripe-signature")
+    webhook_secret = os.getenv("STRIPE_WEBHOOK_SECRET")
+
+    if not signature:
+        raise HTTPException(
+            status_code=400,
+            detail="Missing Stripe-Signature header",
         )
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail="Invalid payload") from e
-    except stripe.error.SignatureVerificationError as e:
-        raise HTTPException(status_code=400, detail="Invalid signature") from e
-    
-    # Handle the event
+
+    if not webhook_secret:
+        raise HTTPException(
+            status_code=500,
+            detail="STRIPE_WEBHOOK_SECRET is not configured",
+        )
+
+    try:
+        event = stripe.Webhook.construct_event(
+            payload=payload,
+            sig_header=signature,
+            secret=webhook_secret,
+        )
+    except ValueError:
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid Stripe webhook payload",
+        )
+    except stripe.error.SignatureVerificationError:
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid Stripe webhook signature",
+        )
+
     result = stripe_service.handle_webhook_event(
         event_type=event["type"],
-        event_data=event["data"],
-        db=db
+        event_data=event["data"]["object"],
+        db=db,
     )
-    
-    return WebhookResponse(status=result["status"], message=result["message"])
 
+    return {
+        "received": True,
+        "event_type": event["type"],
+        "result": result,
+    }
 
 @app.get("/users/{user_id}/subscription")
 def get_user_subscription(user_id: int, db: Session = Depends(get_database)):

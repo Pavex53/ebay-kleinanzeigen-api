@@ -93,3 +93,4 @@ uvloop==0.21.0
     # via ebay-kleinanzeigen-api (pyproject.toml)
 yarl==1.20.1
     # via aiohttp
+stripe==8.11.0

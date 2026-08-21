@@ -9,7 +9,7 @@ psycopg2-binary==2.9.9
 alembic==1.13.1
 
 # Stripe
-stripe==7.8.0
+stripe==8.11.0
 
 # Telegram
 python-telegram-bot==20.7

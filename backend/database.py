@@ -38,8 +38,9 @@ class Database:
 db: Database | None = None
 
 
-def get_db() -> Session:
-    """Dependency for FastAPI to get DB session."""
+def get_db():
+    """FastAPI dependency that yields one database session per request."""
     if db is None:
-        raise RuntimeError("Database not initialized. Call init_database() first.")
-    return next(db.get_session())
+        raise RuntimeError("Database not initialized.")
+
+    yield from db.get_session()

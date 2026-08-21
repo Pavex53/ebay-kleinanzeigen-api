@@ -1,89 +1,105 @@
+name: ebay-kleinanzeigen-api
+
 services:
   postgres:
     image: postgres:16-alpine
+    container_name: kleinanzeigen-postgres
     restart: unless-stopped
     environment:
-      POSTGRES_DB: ${POSTGRES_DB:-kleinanzeigen_saas}
-      POSTGRES_USER: ${POSTGRES_USER:-kleinanzeigen}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+      POSTGRES_USER: kleinanzeigen
+      POSTGRES_PASSWORD: dev#1337
+      POSTGRES_DB: kleinanzeigen_saas
     volumes:
       - postgres_data:/var/lib/postgresql/data
+    networks:
+      - internal
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
       interval: 10s
       timeout: 5s
       retries: 5
-    networks:
-      - internal
 
   scraper:
     build:
       context: .
       dockerfile: Dockerfile
+    container_name: kleinanzeigen-scraper
     restart: unless-stopped
-    environment:
-      PYTHONUNBUFFERED: "1"
     expose:
       - "8000"
     networks:
       - internal
-
+    environment:
+      - PYTHONUNBUFFERED=1
 
   backend:
     build:
       context: .
       dockerfile: Dockerfile.backend
+    container_name: kleinanzeigen-backend
     restart: unless-stopped
-    env_file:
-      - .env
-    environment:
-      DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER:-kleinanzeigen}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-kleinanzeigen_saas}
-      BASE_URL: ${BASE_URL}
-      STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY}
-      STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET}
-      STRIPE_PRICE_BASIC: ${STRIPE_PRICE_BASIC}
-      STRIPE_PRICE_PRO: ${STRIPE_PRICE_PRO}
-      STRIPE_PRICE_EXPERT: ${STRIPE_PRICE_EXPERT}
-      PYTHONUNBUFFERED: "1"
-    depends_on:
-      postgres:
-        condition: service_healthy
     ports:
       - "127.0.0.1:8000:8000"
     networks:
-      - internal
       - edge
-
-  bot:
-    dns:
-      - 1.1.1.1
-      - 8.8.8.8	
-    build:
-      context: .
-      dockerfile: Dockerfile.bot
-    restart: unless-stopped
-    env_file:
-      - .env
-    environment:
-      DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER:-kleinanzeigen}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-kleinanzeigen_saas}
-      BACKEND_URL: http://backend:8000
-      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN}
-      STRIPE_PRICE_BASIC: ${STRIPE_PRICE_BASIC}
-      STRIPE_PRICE_PRO: ${STRIPE_PRICE_PRO}
-      STRIPE_PRICE_EXPERT: ${STRIPE_PRICE_EXPERT}
-      PYTHONUNBUFFERED: "1"
+      - internal
     depends_on:
       postgres:
         condition: service_healthy
+    environment:
+      - PYTHONUNBUFFERED=1
+      - DATABASE_URL=postgresql+psycopg2://kleinanzeigen:dev%231337@postgres:5432/kleinanzeigen_saas
+      - POSTGRES_USER=kleinanzeigen
+      - POSTGRES_PASSWORD=dev#1337
+      - POSTGRES_DB=kleinanzeigen_saas
+      - BASE_URL=https://api.example.de
+      - STRIPE_SECRET_KEY=${STRIPE_SECRET_KEY}
+      - STRIPE_WEBHOOK_SECRET=${STRIPE_WEBHOOK_SECRET}
+      - STRIPE_PRICE_BASIC=${STRIPE_PRICE_BASIC}
+      - STRIPE_PRICE_PRO=${STRIPE_PRICE_PRO}
+      - STRIPE_PRICE_EXPERT=${STRIPE_PRICE_EXPERT}
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
+
+  bot:
+    build:
+      context: .
+      dockerfile: Dockerfile.bot
+    container_name: kleinanzeigen-bot
+    restart: unless-stopped
+    networks:
+      - edge
+      - internal
+    dns:
+      - 1.1.1.1
+      - 8.8.8.8
+    depends_on:
       backend:
         condition: service_started
-    networks:
-      - internal
+      postgres:
+        condition: service_healthy
+    environment:
+      - PYTHONUNBUFFERED=1
+      - DATABASE_URL=postgresql+psycopg2://kleinanzeigen:dev%231337@postgres:5432/kleinanzeigen_saas
+      - POSTGRES_USER=kleinanzeigen
+      - POSTGRES_PASSWORD=dev#1337
+      - POSTGRES_DB=kleinanzeigen_saas
+      - BASE_URL=https://api.example.de
+      - BACKEND_URL=http://backend:8000
+      - TELEGRAM_BOT_TOKEN=8673260776:AAFqVEOZKQd81oGk7KoEJV2jd3XRjAhu0gw
+      - STRIPE_PRICE_BASIC=${STRIPE_PRICE_BASIC}
+      - STRIPE_PRICE_PRO=${STRIPE_PRICE_PRO}
+      - STRIPE_PRICE_EXPERT=${STRIPE_PRICE_EXPERT}
+
+networks:
+  edge:
+    name: ebay-kleinanzeigen-api_edge
+    driver: bridge
+
+  internal:
+    name: ebay-kleinanzeigen-api_internal
+    driver: bridge
+    internal: true
 
 volumes:
   postgres_data:
-
-networks:
-  internal:
-    internal: true
-  edge:
+    name: ebay-kleinanzeigen-api_postgres_data
