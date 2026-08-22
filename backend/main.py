@@ -1,7 +1,6 @@
 import os
 import logging
 from contextlib import asynccontextmanager
-from typing import Annotated
 from datetime import datetime, timedelta
 
 import stripe
@@ -9,7 +8,6 @@ from fastapi import FastAPI, HTTPException, Depends, status, APIRouter, Query
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
-from supabase import Client, create_client
 from dotenv import load_dotenv
 
 # Load environment variables
@@ -20,8 +18,6 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # Environment variables
-SUPABASE_URL = os.getenv("SUPABASE_URL")
-SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 STRIPE_SECRET_KEY = os.getenv("STRIPE_SECRET_KEY")
 STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET")
 STRIPE_PRICE_BASIC = os.getenv("STRIPE_PRICE_BASIC")
@@ -31,14 +27,10 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 ENV = os.getenv("ENV", "prod")
 BASE_URL = os.getenv("BASE_URL", "")
 
-# Initialize Supabase client
-supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 # Initialize Stripe
 stripe.api_key = STRIPE_SECRET_KEY
 
-# Security
-security = HTTPBearer()
 
 # FastAPI app
 app = FastAPI(
@@ -56,14 +48,7 @@ class CheckoutRequest(BaseModel):
 class WebhookRequest(BaseModel):
     user_id: int
 
-# Helper function to get current user
-async def get_current_user(credentials: Annotated[HTTPAuthorizationCredentials, Depends(security)]) -> dict:
-    token = credentials.credentials
-    try:
-        response = supabase.auth.get_user(token)
-        return response.user
-    except Exception as e:
-        raise HTTPException(status_code=401, detail="Invalid token")
+
 
 @app.get("/success", response_class=HTMLResponse)
 def checkout_success(session_id: str = Query(...)) -> str:
