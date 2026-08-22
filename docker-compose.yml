@@ -52,7 +52,7 @@ services:
       - POSTGRES_USER=kleinanzeigen
       - POSTGRES_PASSWORD=dev#1337
       - POSTGRES_DB=kleinanzeigen_saas
-      - BASE_URL=https://api.example.de
+      - BASE_URL=${BASE_URL}
       - STRIPE_SECRET_KEY=${STRIPE_SECRET_KEY}
       - STRIPE_WEBHOOK_SECRET=${STRIPE_WEBHOOK_SECRET}
       - STRIPE_PRICE_BASIC=${STRIPE_PRICE_BASIC}
@@ -83,7 +83,7 @@ services:
       - POSTGRES_USER=kleinanzeigen
       - POSTGRES_PASSWORD=dev#1337
       - POSTGRES_DB=kleinanzeigen_saas
-      - BASE_URL=https://api.example.de
+      - BASE_URL=${BASE_URL}
       - BACKEND_URL=http://backend:8000
       - TELEGRAM_BOT_TOKEN=8673260776:AAFqVEOZKQd81oGk7KoEJV2jd3XRjAhu0gw
       - STRIPE_PRICE_BASIC=${STRIPE_PRICE_BASIC}
