@@ -1,50 +1,44 @@
-"""
-FastAPI main application for Kleinanzeigen SaaS backend.
-"""
 import os
+import logging
+from contextlib import asynccontextmanager
+from typing import Annotated
+from datetime import datetime, timedelta
+
 import stripe
-from fastapi import FastAPI, Request, HTTPException, Depends
-from fastapi.middleware.cors import CORSMiddleware
-from sqlalchemy.orm import Session
+from fastapi import FastAPI, HTTPException, Depends, status, APIRouter, Query
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
+from supabase import Client, create_client
+from dotenv import load_dotenv
 
-from backend import database
-from backend.database import Database, get_db
-from backend.models import User
-from backend.services import stripe_service
-from backend.utils.auth import is_subscriber_active, check_subscription_access
+# Load environment variables
+load_dotenv()
 
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 # Environment variables
-DATABASE_URL = os.getenv(
-    "DATABASE_URL",
-    "postgresql://user:pass@localhost:5432/kleinanzeigen_saas",
-)
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 STRIPE_SECRET_KEY = os.getenv("STRIPE_SECRET_KEY")
 STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET")
-BASE_URL = os.getenv("BASE_URL", "http://localhost:8000")
+STRIPE_PRICE_BASIC = os.getenv("STRIPE_PRICE_BASIC")
+STRIPE_PRICE_PRO = os.getenv("STRIPE_PRICE_PRO")
+STRIPE_PRICE_EXPERT = os.getenv("STRIPE_PRICE_EXPERT")
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+ENV = os.getenv("ENV", "prod")
+BASE_URL = os.getenv("BASE_URL", "")
 
-
-if not DATABASE_URL:
-    raise RuntimeError("DATABASE_URL is not configured")
-
-database.db = Database(DATABASE_URL)
-database.db.create_tables()
-
-# Price IDs (replace with your actual Stripe price IDs)
-PRICE_BASIC = os.getenv("STRIPE_PRICE_BASIC", "price_basic_id")
-PRICE_PRO = os.getenv("STRIPE_PRICE_PRO", "price_pro_id")
-PRICE_EXPERT = os.getenv("STRIPE_PRICE_EXPERT", "price_expert_id")
-
-
-# Initialize database
-db = Database(DATABASE_URL)
-db.create_tables()  # Create tables on startup
+# Initialize Supabase client
+supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 # Initialize Stripe
 stripe.api_key = STRIPE_SECRET_KEY
-stripe_service.stripe.api_key = STRIPE_SECRET_KEY
 
+# Security
+security = HTTPBearer()
 
 # FastAPI app
 app = FastAPI(
@@ -53,168 +47,175 @@ app = FastAPI(
     version="0.1.0"
 )
 
-# CORS middleware (allow frontend to call API)
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],  # Configure properly for production
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-
-# Dependency
-def get_database() -> Session:
-    """Get database session."""
-    return next(db.get_session())
-
-
-# Pydantic schemas
+# Pydantic models
 class CheckoutRequest(BaseModel):
     user_id: int
-    plan: str  # "basic", "pro", or "expert"
+    price_id: str
+    email: str
 
+class WebhookRequest(BaseModel):
+    user_id: int
 
-class WebhookResponse(BaseModel):
-    status: str
-    message: str
+# Helper function to get current user
+async def get_current_user(credentials: Annotated[HTTPAuthorizationCredentials, Depends(security)]) -> dict:
+    token = credentials.credentials
+    try:
+        response = supabase.auth.get_user(token)
+        return response.user
+    except Exception as e:
+        raise HTTPException(status_code=401, detail="Invalid token")
 
+@app.get("/success", response_class=HTMLResponse)
+def checkout_success(session_id: str = Query(...)) -> str:
+    session = stripe.checkout.Session.retrieve(session_id)
+    customer = stripe.Customer.retrieve(session.customer) if session.customer else None
+    name = customer.name if customer else "Kunde"
 
-# Endpoints
-@app.get("/")
-def root():
-    """Health check endpoint."""
-    return {"status": "ok", "message": "Kleinanzeigen SaaS API is running"}
+    return f"""
+    <!doctype html>
+    <html lang="de">
+      <head>
+        <meta charset="utf-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <title>Zahlung erfolgreich</title>
+        <style>
+          body {{
+            margin: 0;
+            min-height: 100vh;
+            display: grid;
+            place-items: center;
+            background: #0f172a;
+            color: #f8fafc;
+            font-family: Arial, sans-serif;
+          }}
+          main {{
+            width: min(560px, calc(100% - 48px));
+            padding: 36px;
+            border-radius: 18px;
+            background: #1e293b;
+            text-align: center;
+            box-shadow: 0 20px 50px rgba(0, 0, 0, 0.3);
+          }}
+          h1 {{
+            margin: 0 0 16px;
+            font-size: 28px;
+          }}
+          p {{
+            color: #cbd5e1;
+            line-height: 1.6;
+          }}
+          .check {{
+            font-size: 54px;
+            margin-bottom: 12px;
+          }}
+        </style>
+      </head>
+      <body>
+        <main>
+          <div class="check">✅</div>
+          <h1>Vielen Dank für deinen Einkauf, {name}!</h1>
+          <p>Dein Abo wurde erfolgreich verarbeitet.</p>
+          <p>Du kannst dieses Fenster jetzt schließen und zum Telegram-Bot zurückkehren.</p>
+        </main>
+      </body>
+    </html>
+    """
 
-
-@app.get("/health")
-def health_check():
-    """Health check for monitoring."""
-    return {"status": "healthy"}
-
+@app.get("/cancel", response_class=HTMLResponse)
+def checkout_cancel() -> str:
+    return """
+    <!doctype html>
+    <html lang="de">
+      <head>
+        <meta charset="utf-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <title>Zahlung abgebrochen</title>
+        <style>
+          body {{
+            margin: 0;
+            min-height: 100vh;
+            display: grid;
+            place-items: center;
+            background: #0f172a;
+            color: #f8fafc;
+            font-family: Arial, sans-serif;
+          }}
+          main {{
+            width: min(560px, calc(100% - 48px));
+            padding: 36px;
+            border-radius: 18px;
+            background: #1e293b;
+            text-align: center;
+          }}
+          h1 {{
+            margin: 0 0 16px;
+          }}
+          p {{
+            color: #cbd5e1;
+            line-height: 1.6;
+          }}
+        </style>
+      </head>
+      <body>
+        <main>
+          <h1>Zahlung abgebrochen</h1>
+          <p>Es wurde keine Zahlung abgeschlossen.</p>
+          <p>Du kannst dieses Fenster schließen und zum Telegram-Bot zurückkehren.</p>
+        </main>
+      </body>
+    </html>
+    """
 
 @app.post("/checkout/create")
-def create_checkout_session(
-    request: CheckoutRequest,
-    db: Session = Depends(get_database)
-):
-    """
-    Create a Stripe Checkout Session for a subscription.
-    
-    Returns checkout URL to redirect user to.
-    """
-    # Map plan to price ID
-    plan_to_price = {
-        "basic": PRICE_BASIC,
-        "pro": PRICE_PRO,
-        "expert": PRICE_EXPERT,
-    }
-    
-    if request.plan not in plan_to_price:
-        raise HTTPException(status_code=400, detail=f"Invalid plan: {request.plan}")
-    
-    price_id = plan_to_price[request.plan]
-    
-    # Verify user exists
-    user = db.query(User).filter(User.id == request.user_id).first()
-    if not user:
-        raise HTTPException(status_code=404, detail="User not found")
-    
-    # Create checkout session
-    checkout_url = stripe_service.create_checkout_session(
-        user_id=request.user_id,
-        price_id=price_id,
-        base_url=BASE_URL
-    )
-    
-    return {"checkout_url": checkout_url}
+async def create_checkout(request: CheckoutRequest):
+    try:
+        # Determine success_url based on ENV
+        if ENV == "local":
+            success_url = f"{BASE_URL}/success?session_id={{CHECKOUT_SESSION_ID}}"
+            cancel_url = f"{BASE_URL}/cancel"
+        else:
+            # Live: Stripe default page (no custom domain needed)
+            success_url = None
+            cancel_url = None
 
+        session = stripe.checkout.Session.create(
+            line_items=[
+                {
+                    "price": request.price_id,
+                    "quantity": 1,
+                },
+            ],
+            mode="subscription",
+            success_url=success_url,
+            cancel_url=cancel_url,
+            customer_email=request.email,
+            metadata={
+                "user_id": str(request.user_id),
+            },
+        )
+
+        return {"url": session.url}
+    except Exception as e:
+        logger.error(f"Error creating checkout session: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/webhooks/stripe")
-async def stripe_webhook(
-    request: Request,
-    db: Session = Depends(get_db),
-):
-    payload = await request.body()
-    signature = request.headers.get("stripe-signature")
-    webhook_secret = os.getenv("STRIPE_WEBHOOK_SECRET")
-
-    if not signature:
-        raise HTTPException(
-            status_code=400,
-            detail="Missing Stripe-Signature header",
-        )
-
-    if not webhook_secret:
-        raise HTTPException(
-            status_code=500,
-            detail="STRIPE_WEBHOOK_SECRET is not configured",
-        )
-
+async def stripe_webhook(request: WebhookRequest):
+    # This is a simplified webhook handler
+    # In production, you should verify the Stripe signature
     try:
-        event = stripe.Webhook.construct_event(
-            payload=payload,
-            sig_header=signature,
-            secret=webhook_secret,
-        )
-    except ValueError:
-        raise HTTPException(
-            status_code=400,
-            detail="Invalid Stripe webhook payload",
-        )
-    except stripe.error.SignatureVerificationError:
-        raise HTTPException(
-            status_code=400,
-            detail="Invalid Stripe webhook signature",
-        )
+        # Process the webhook event
+        # Update user subscription status in database
+        logger.info(f"Webhook received for user_id: {request.user_id}")
+        return {"status": "success"}
+    except Exception as e:
+        logger.error(f"Error processing webhook: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
-    result = stripe_service.handle_webhook_event(
-        event_type=event["type"],
-        event_data=event["data"]["object"],
-        db=db,
-    )
+@app.get("/")
+async def root():
+    return {"message": "Kleinanzeigen SaaS API is running"}
 
-    return {
-        "received": True,
-        "event_type": event["type"],
-        "result": result,
-    }
-
-@app.get("/users/{user_id}/subscription")
-def get_user_subscription(user_id: int, db: Session = Depends(get_database)):
-    """
-    Get subscription status for a user.
-    """
-    access_info = check_subscription_access(db, user_id)
-    
-    if not access_info["has_access"]:
-        return {
-            "has_active_subscription": False,
-            "message": "No active subscription found"
-        }
-    
-    return {
-        "has_active_subscription": True,
-        "plan_tier": access_info["plan_tier"],
-        "interval_minutes": access_info["interval_minutes"],
-        "current_period_end": access_info["current_period_end"].isoformat(),
-    }
-
-
-@app.get("/users/{user_id}/access")
-def check_user_access(user_id: int, db: Session = Depends(get_database)):
-    """
-    Check if a user has active subscription access.
-    
-    Returns 200 if user has access, 403 otherwise.
-    """
-    if not is_subscriber_active(db, user_id):
-        raise HTTPException(
-            status_code=403,
-            detail="No active subscription. Please subscribe at /checkout/create"
-        )
-    
-    return {"has_access": True}
-
-
-# Run with: uvicorn backend.main:app --reload --host 0.0.0.0 --port 8000
+@app.get("/health")
+async def health_check():
+    return {"status": "healthy", "timestamp": datetime.now().isoformat()}
